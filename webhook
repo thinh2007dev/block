@@ -1,0 +1,167 @@
+-- Webhook Blocker for Roblox
+-- Chặn toàn bộ webhook một lần khi execute
+-- Version: 1.0
+
+if getgenv().WEBHOOK_BLOCKER_LOADED then
+    warn('[Webhook Blocker] Đã được load trước đó!')
+    return
+end
+
+getgenv().WEBHOOK_BLOCKER_LOADED = true
+print('[Webhook Blocker] Đang khởi động...')
+
+-- Lưu các function gốc
+local original_request = (syn and syn.request) or (http and http.request) or http_request or request
+local original_httprequest = game.HttpGet
+
+-- Danh sách các webhook patterns cần block
+local webhook_patterns = {
+    "discord%.com/api/webhooks",
+    "discordapp%.com/api/webhooks",
+    "hooks%.slack%.com",
+    "webhook",
+    "hooks%.zapier%.com",
+    "maker%.ifttt%.com",
+    "hook%.io",
+    "pipedream%.com",
+    "integromat%.com",
+    "n8n%.io",
+    "hookdeck%.com"
+}
+
+-- Hàm kiểm tra URL có phải webhook không
+local function is_webhook(url)
+    if not url or type(url) ~= "string" then
+        return false
+    end
+    
+    local url_lower = string.lower(url)
+    
+    for _, pattern in ipairs(webhook_patterns) do
+        if string.match(url_lower, pattern) then
+            return true
+        end
+    end
+    
+    return false
+end
+
+-- Hook syn.request / http.request / request
+if original_request then
+    local function new_request(options)
+        if type(options) == "table" and options.Url then
+            if is_webhook(options.Url) then
+                warn('[Webhook Blocker] ❌ Chặn request:', options.Method or 'GET', options.Url)
+                
+                -- Trả về response giả
+                return {
+                    Success = true,
+                    StatusCode = 200,
+                    StatusMessage = "OK (Blocked)",
+                    Body = '{"blocked":true}',
+                    Headers = {
+                        ["content-type"] = "application/json"
+                    }
+                }
+            end
+        end
+        
+        return original_request(options)
+    end
+    
+    -- Replace các function
+    if syn and syn.request then
+        syn.request = new_request
+    end
+    if http and http.request then
+        http.request = new_request
+    end
+    if getgenv().request then
+        getgenv().request = new_request
+    end
+    if getgenv().http_request then
+        getgenv().http_request = new_request
+    end
+    
+    print('[Webhook Blocker] ✅ Đã hook request functions')
+end
+
+-- Hook game:HttpGet và HttpPost
+local HttpService = game:GetService("HttpService")
+
+local mt = getrawmetatable(game)
+local old_namecall = mt.__namecall
+setreadonly(mt, false)
+
+mt.__namecall = newcclosure(function(self, ...)
+    local args = {...}
+    local method = getnamecallmethod()
+    
+    if method == "HttpGet" or method == "HttpGetAsync" then
+        local url = args[1]
+        if is_webhook(url) then
+            warn('[Webhook Blocker] ❌ Chặn HttpGet:', url)
+            return '{"blocked":true}'
+        end
+    elseif method == "HttpPost" or method == "HttpPostAsync" then
+        local url = args[1]
+        if is_webhook(url) then
+            warn('[Webhook Blocker] ❌ Chặn HttpPost:', url)
+            return '{"blocked":true}'
+        end
+    elseif method == "GetAsync" or method == "PostAsync" or method == "RequestAsync" then
+        if self == HttpService then
+            local url = args[1]
+            if type(url) == "string" and is_webhook(url) then
+                warn('[Webhook Blocker] ❌ Chặn HttpService.' .. method .. ':', url)
+                if method == "RequestAsync" then
+                    return {
+                        Success = true,
+                        StatusCode = 200,
+                        StatusMessage = "OK (Blocked)",
+                        Body = '{"blocked":true}',
+                        Headers = {}
+                    }
+                end
+                return '{"blocked":true}'
+            elseif type(url) == "table" and url.Url and is_webhook(url.Url) then
+                warn('[Webhook Blocker] ❌ Chặn HttpService.' .. method .. ':', url.Url)
+                return {
+                    Success = true,
+                    StatusCode = 200,
+                    StatusMessage = "OK (Blocked)",
+                    Body = '{"blocked":true}',
+                    Headers = {}
+                }
+            end
+        end
+    end
+    
+    return old_namecall(self, ...)
+end)
+
+setreadonly(mt, true)
+
+print('[Webhook Blocker] ✅ Đã hook HttpService methods')
+
+-- Hook WebSocket nếu có
+if syn and syn.websocket then
+    local old_websocket = syn.websocket.connect
+    syn.websocket.connect = function(url)
+        if is_webhook(url) then
+            warn('[Webhook Blocker] ❌ Chặn WebSocket:', url)
+            -- Trả về mock websocket
+            return {
+                Send = function() end,
+                Close = function() end,
+                OnMessage = {Connect = function() end},
+                OnClose = {Connect = function() end}
+            }
+        end
+        return old_websocket(url)
+    end
+    print('[Webhook Blocker] ✅ Đã hook WebSocket')
+end
+
+print('[Webhook Blocker] ✅ Hoàn tất! Tất cả webhook đã bị chặn.')
+print('[Webhook Blocker] Để vô hiệu hóa, execute lại script của bạn.')
