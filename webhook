@@ -1,14 +1,13 @@
--- Webhook Blocker v3.0 - CHỈ BLOCK WEBHOOK
--- Không động vào HTTP services khác của game
--- Safe cho mọi game/hub
+-- Webhook Blocker v4.0 - MOBILE & PC COMPATIBLE
+-- Tối ưu cho mọi executor (Solara, Wave, Arceus X, Delta...)
 
-if getgenv().WEBHOOK_BLOCKER_V3_LOADED then
+if getgenv().WEBHOOK_BLOCKER_V4_LOADED then
     return
 end
 
-getgenv().WEBHOOK_BLOCKER_V3_LOADED = true
+getgenv().WEBHOOK_BLOCKER_V4_LOADED = true
 
-local ENABLE_LOGS = false
+local ENABLE_LOGS = false -- Tắt log để tránh lag trên mobile
 
 local function log(...)
     if ENABLE_LOGS then
@@ -16,28 +15,31 @@ local function log(...)
     end
 end
 
-log('Khởi động Webhook Blocker v3.0 (Safe Mode)...')
+log('🚀 Khởi động Webhook Blocker v4.0 (Mobile Compatible)...')
 
--- CHỈ BLOCK NHỮNG DOMAIN NÀY (webhook thực sự)
+-- Danh sách webhook domains cần block
 local webhook_domains = {
     "discord.com/api/webhooks",
     "discordapp.com/api/webhooks",
     "discord.gg/api/webhooks",
+    "ptb.discord.com/api/webhooks",
+    "canary.discord.com/api/webhooks",
     "hooks.slack.com/services",
-    "hooks.slack.com/workflows"
+    "hooks.slack.com/workflows",
+    "webhook.site",
+    "requestcatcher.com"
 }
 
--- Hàm check CHÍNH XÁC webhook (strict mode)
-local function is_webhook_strict(url)
+-- Kiểm tra URL có phải webhook không
+local function is_webhook(url)
     if not url or type(url) ~= "string" then
         return false
     end
     
     local url_lower = url:lower()
     
-    -- CHỈ BLOCK NẾU MATCH CHÍNH XÁC
     for _, domain in ipairs(webhook_domains) do
-        if url_lower:find(domain, 1, true) then -- true = plain text search
+        if url_lower:find(domain, 1, true) then
             return true
         end
     end
@@ -45,65 +47,94 @@ local function is_webhook_strict(url)
     return false
 end
 
--- ========== CHỈ HOOK REQUEST FUNCTIONS (KHÔNG ĐỘNG VÀO GAME HTTP) ==========
-local function hook_request_only()
-    local original_request = request or http_request or (http and http.request) or (syn and syn.request)
+-- Response giả để tránh crash
+local function create_fake_response()
+    return {
+        Success = true,
+        StatusCode = 200,
+        StatusMessage = "OK",
+        Body = '{"success":true,"message":"Request blocked by webhook blocker"}',
+        Headers = {
+            ["content-type"] = "application/json",
+            ["x-blocked-by"] = "webhook-blocker-v4"
+        }
+    }
+end
+
+-- ========== HOOK REQUEST FUNCTIONS ==========
+local function hook_request_functions()
+    -- Tìm request function (hỗ trợ nhiều executor)
+    local original_request = 
+        request or 
+        http_request or 
+        (http and http.request) or 
+        (syn and syn.request) or
+        (fluxus and fluxus.request) or
+        (getgenv().request)
     
     if not original_request then
-        log('Không tìm thấy request function')
-        return
+        log('⚠️ Không tìm thấy request function')
+        return false
     end
     
     local function safe_request(options)
-        -- CHỈ CHECK request function, KHÔNG CHECK game:HttpGet
+        -- Kiểm tra options
         if type(options) == "table" and options.Url then
-            if is_webhook_strict(options.Url) then
-                warn('[Webhook Block] 🛑 Chặn:', options.Url)
-                
-                -- Trả về response giả để không crash
-                return {
-                    Success = true,
-                    StatusCode = 200,
-                    StatusMessage = "OK",
-                    Body = '{"success":true,"blocked":true}',
-                    Headers = {
-                        ["content-type"] = "application/json"
-                    }
-                }
+            if is_webhook(options.Url) then
+                warn('🛑 [Webhook Blocked]:', options.Url)
+                return create_fake_response()
+            end
+        elseif type(options) == "string" then
+            if is_webhook(options) then
+                warn('🛑 [Webhook Blocked]:', options)
+                return create_fake_response()
             end
         end
         
-        -- Không phải webhook -> cho qua bình thường
+        -- Cho qua nếu không phải webhook
         return original_request(options)
     end
     
-    -- Override request functions
-    if getgenv().request then
-        getgenv().request = safe_request
-    end
-    if getgenv().http_request then
-        getgenv().http_request = safe_request
-    end
-    if http and http.request then
-        http.request = safe_request
-    end
-    if syn and syn.request then
-        syn.request = safe_request
+    -- Override tất cả các biến thể của request
+    local request_names = {
+        "request",
+        "http_request", 
+        "http.request",
+        "syn.request",
+        "fluxus.request"
+    }
+    
+    for _, name in ipairs(request_names) do
+        local parts = string.split(name, ".")
+        if #parts == 1 then
+            if getgenv()[name] then
+                getgenv()[name] = safe_request
+            end
+        elseif #parts == 2 then
+            local parent = getgenv()[parts[1]]
+            if parent and parent[parts[2]] then
+                parent[parts[2]] = safe_request
+            end
+        end
     end
     
-    log('✓ Đã hook request functions (safe mode)')
+    log('✓ Đã hook request functions')
+    return true
 end
 
--- ========== HOOK WEBSOCKET (CHỈ WEBHOOK WS) ==========
-local function hook_websocket_only()
+-- ========== HOOK WEBSOCKET ==========
+local function hook_websocket()
+    local ws_found = false
+    
+    -- Syn WebSocket
     if syn and syn.websocket and syn.websocket.connect then
         local original_ws = syn.websocket.connect
         
         syn.websocket.connect = function(url)
-            if is_webhook_strict(url) then
-                warn('[Webhook Block] 🛑 Chặn WebSocket:', url)
+            if is_webhook(url) then
+                warn('🛑 [WebSocket Blocked]:', url)
                 
-                -- Mock websocket
+                -- Mock websocket object
                 return {
                     Send = function() end,
                     Close = function() end,
@@ -115,28 +146,65 @@ local function hook_websocket_only()
             return original_ws(url)
         end
         
-        log('✓ Đã hook WebSocket (safe mode)')
+        ws_found = true
+        log('✓ Đã hook Syn WebSocket')
     end
+    
+    -- WebSocket library (nếu có)
+    if getgenv().WebSocket and getgenv().WebSocket.connect then
+        local original_ws = getgenv().WebSocket.connect
+        
+        getgenv().WebSocket.connect = function(url)
+            if is_webhook(url) then
+                warn('🛑 [WebSocket Blocked]:', url)
+                return {
+                    Send = function() end,
+                    Close = function() end,
+                    OnMessage = {Connect = function() return {Disconnect = function() end} end}
+                }
+            end
+            
+            return original_ws(url)
+        end
+        
+        ws_found = true
+        log('✓ Đã hook WebSocket library')
+    end
+    
+    if not ws_found then
+        log('⚠️ Không tìm thấy WebSocket functions')
+    end
+    
+    return ws_found
 end
 
--- ========== KHỞI TẠO (CHỈ HOOK CÁI CẦN) ==========
+-- ========== KHỞI TẠO ==========
 local success, err = pcall(function()
-    hook_request_only()      -- Chỉ hook request functions
-    hook_websocket_only()    -- Chỉ hook websocket
+    local request_hooked = hook_request_functions()
+    local websocket_hooked = hook_websocket()
     
-    -- KHÔNG HOOK:
-    -- - game:HttpGet
-    -- - game:HttpPost  
-    -- - HttpService:GetAsync
-    -- - HttpService:PostAsync
-    -- - HttpService:RequestAsync
-    -- Vì những cái này game cần dùng!
+    if request_hooked or websocket_hooked then
+        log('✅ Webhook Blocker v4.0 đã kích hoạt')
+        log('🛡️ Đang bảo vệ khỏi webhook leaks')
+    else
+        warn('⚠️ Webhook Blocker: Không hook được function nào')
+    end
 end)
 
-if success then
-    log('✅ Webhook Blocker v3.0 sẵn sàng (Safe Mode)')
-    log('🛡️ Chỉ block Discord/Slack webhooks')
-    log('✓ Không ảnh hưởng đến HTTP services của game')
-else
-    warn('[Webhook Block] ❌ Lỗi:', err)
+if not success then
+    warn('❌ [Webhook Blocker] Lỗi khởi tạo:', err)
+end
+
+-- Thông báo kích hoạt (tùy chọn)
+if game:IsLoaded() then
+    task.spawn(function()
+        local StarterGui = game:GetService("StarterGui")
+        pcall(function()
+            StarterGui:SetCore("SendNotification", {
+                Title = "🛡️ Webhook Blocker",
+                Text = "v4.0 đã kích hoạt!",
+                Duration = 3
+            })
+        end)
+    end)
 end
